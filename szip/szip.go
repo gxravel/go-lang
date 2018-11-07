@@ -41,8 +41,8 @@ type Meta struct {
 func init() {
 	flag.StringVar(&mode, "mode", "required", "mode")
 	flag.StringVar(&hash, "hash", "", "hash")
-	flag.StringVar(&cert, "cert", "./data2/my.crt", "certificate path")
-	flag.StringVar(&pkey, "pkey", "./data2/my.key", "private key path")
+	flag.StringVar(&cert, "cert", "./my.crt", "certificate path")
+	flag.StringVar(&pkey, "pkey", "./my.key", "private key path")
 	flag.StringVar(&path, "path", "./data/", "read/write files path")
 }
 
