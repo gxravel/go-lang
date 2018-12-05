@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"time"
@@ -26,14 +27,15 @@ var cert string
 var pkey string
 var path string
 var modesEnum = []string{"z", "x", "i"}
+var enc *xml.Encoder
 
 const zName = "szip"
+const metaName = "meta.xml"
 
-type Meta struct {
+type metaStruct struct {
 	XMLName          xml.Name  `xml:"meta"`
 	Name             string    `xml:"name"`
 	UncompressedSize uint64    `xml:"size>original_size"`
-	CompressedSize   uint64    `xml:"size>compressed_size"`
 	ModTime          time.Time `xml:"mod_time"`
 	SHA1             string    `xml:"sha1_hash"`
 }
@@ -46,307 +48,429 @@ func init() {
 	flag.StringVar(&path, "path", "./data/", "read/write files path")
 }
 
-func Execute(mode string) {
+func main() {
+	flag.Parse()
+	execute(mode)
+}
+
+func execute(mode string) {
+	var err error
 	switch mode {
 	case modesEnum[0]:
-		Zip(zName)
+		err = zipFunc(zName)
 	case modesEnum[1]:
-		Extract(zName)
+		err = extract(zName)
 	case modesEnum[2]:
-		Info(zName)
+		err = info(zName)
 	default:
-		fmt.Print("mode can be only -z, -x or -i")
+		err = errors.New("mode can be only -z, -x or -i")
 	}
+	log.Fatal(err)
 }
 
-func CheckErr(err error) {
+func addData(zPath string, w *zip.Writer) (err error) {
+	data, err := os.Open(path + zPath)
 	if err != nil {
-		log.Fatal(err)
+		return
 	}
-}
-
-func OpenFile(path string) *os.File {
-	f, err := os.Open(path)
-	CheckErr(err)
-	return f
-}
-
-func ReadFile(path string) ([]byte, int) {
-	f := OpenFile(path)
-	defer f.Close()
-	fi, err := f.Stat()
-	CheckErr(err)
-	b := make([]byte, fi.Size())
-	count, err := f.Read(b)
-	CheckErr(err)
-	return b, count
-}
-
-func CreateFile(path string) *os.File {
-	w, err := os.Create(path)
-	CheckErr(err)
-	return w
-}
-
-func AddData(zPath string, w *zip.Writer) {
-	data := OpenFile(path + zPath)
 	defer data.Close()
-	dirInfo, dErr := data.Readdir(-1)
-	CheckErr(dErr)
-	for _, file := range dirInfo {
+	dirinfo, err := data.Readdir(-1)
+	if err != nil {
+		return
+	}
+	for _, file := range dirinfo {
 		if file.IsDir() {
 			newFolder := zPath + file.Name() + "/"
-			_, err := w.Create(newFolder)
-			CheckErr(err)
-			AddData(newFolder, w)
+			_, err = w.Create(newFolder)
+			if err != nil {
+				return
+			}
+			addData(newFolder, w)
 		} else {
-			f := OpenFile(path + zPath + file.Name())
-			defer f.Close()
+			f, err := os.Open(path + zPath + file.Name())
+			if err != nil {
+				return err
+			}
 			info, err := f.Stat()
-			CheckErr(err)
+			if err != nil {
+				return err
+			}
 			header, err := zip.FileInfoHeader(info)
-			CheckErr(err)
-			header.Name = zPath + file.Name()
+			if err != nil {
+				return err
+			}
+			fpath := zPath + file.Name()
+			header.Name = fpath
 			header.Method = zip.Deflate
 			writer, err := w.CreateHeader(header)
-			CheckErr(err)
+			if err != nil {
+				return err
+			}
 			_, err = io.Copy(writer, f)
-			CheckErr(err)
+			if err != nil {
+				return err
+			}
+			v := &metaStruct{
+				Name:             fpath,
+				UncompressedSize: header.UncompressedSize64,
+				ModTime:          header.ModTime(),
+			}
+			h := sha1.New()
+			f.Close()
+			f, err = os.Open(path + zPath + file.Name())
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(h, f)
+			if err != nil {
+				return err
+			}
+			v.SHA1 = fmt.Sprintf("%x", h.Sum(nil))
+			err = enc.Encode(v)
+			if err != nil {
+				return err
+			}
 		}
 	}
+	return
 }
 
-func Zip(name string) {
-	fz := CreateFile(name + ".zip")
-	w := zip.NewWriter(fz)
-	AddData("", w)
-	err := w.Close()
-	CheckErr(err)
-	fz.Close()
-
-	CreateSZP(name)
-}
-
-func CreateSZP(name string) {
-	r, err := zip.OpenReader(name + ".zip")
-	CheckErr(err)
-	buf := new(bytes.Buffer)
-	enc := xml.NewEncoder(buf)
-	enc.Indent("  ", "    ")
-	for _, val := range r.File {
-		if val.FileInfo().IsDir() {
-			continue
-		}
-		v := &Meta{
-			Name:             path + val.Name,
-			UncompressedSize: val.UncompressedSize64,
-			CompressedSize:   val.CompressedSize64,
-			ModTime:          val.ModTime()}
-		h := sha1.New()
-		f, err := val.Open()
-		CheckErr(err)
-		_, err = io.Copy(h, f)
-		CheckErr(err)
-		v.SHA1 = fmt.Sprintf("%x", h.Sum(nil))
-		err = enc.Encode(v)
-		CheckErr(err)
-		f.Close()
-	}
-	r.Close()
-	meta, metaSize := CompressData(buf.Bytes())
-	rf, _ := ReadFile(name + ".zip")
-	crt, crtSize := SignData(rf, cert, pkey)
-	szp := CreateFile(name + ".szp")
-	defer szp.Close()
-	size := make([]byte, 4)
-	binary.LittleEndian.PutUint32(size, uint32(crtSize))
-	_, err = szp.Write(size)
-	CheckErr(err)
-	_, err = szp.Write(crt)
-	CheckErr(err)
-	binary.LittleEndian.PutUint32(size, uint32(metaSize))
-	_, err = szp.Write(size)
-	CheckErr(err)
-	_, err = szp.Write(meta)
-	CheckErr(err)
-	_, err = szp.Write(rf)
-	CheckErr(err)
-	err = os.Remove(name + ".zip")
-	CheckErr(err)
-}
-
-func ReadSZP(name string) (crt []byte, meta []byte, z []byte) {
-	szp := OpenFile(name + ".szp")
-	defer szp.Close()
-	size := make([]byte, 4)
-	_, err := szp.Read(size)
-	CheckErr(err)
-	crt = make([]byte, binary.LittleEndian.Uint32(size))
-	_, err = szp.Read(crt)
-	CheckErr(err)
-
-	_, err = szp.Read(size)
-	CheckErr(err)
-	meta = make([]byte, binary.LittleEndian.Uint32(size))
-	_, err = szp.Read(meta)
-	CheckErr(err)
-	meta, _ = UncompressData(meta)
-
-	szpi, err := szp.Stat()
-	CheckErr(err)
-	z = make([]byte, szpi.Size())
-	zSize, err := szp.Read(z)
-	CheckErr(err)
-	z = z[:zSize]
-	return crt, meta, z
-}
-
-func Extract(name string) {
-	crt, meta, z := ReadSZP(name)
-	err := VerifySign(z, crt)
+func zipFunc(name string) (err error) {
+	fz, err := os.Create(name + ".zip")
 	if err != nil {
-		log.Fatal(err)
-	} else {
-		fmt.Println("The sign has been successfully verified")
+		return
 	}
-	fz := CreateFile(name + ".zip")
+	w := zip.NewWriter(fz)
+	meta, err := os.Create(metaName)
+	if err != nil {
+		return
+	}
+	enc = xml.NewEncoder(meta)
+	enc.Indent("  ", "    ")
+	err = addData("", w)
+	if err != nil {
+		return
+	}
+	err = w.Close()
+	if err != nil {
+		return
+	}
+	fz.Close()
+	meta.Close()
+	err = createSZP(name)
+	return
+}
+
+func createSZP(name string) (err error) {
+	zname := name + ".zip"
+	szpname := name + ".szp"
+	fmeta, err := os.Open(metaName)
+	if err != nil {
+		return
+	}
+	meta, err := ioutil.ReadAll(fmeta)
+	if err != nil {
+		return
+	}
+	meta, err = compressData(meta)
+	if err != nil {
+		return
+	}
+	fz, err := os.Open(zname)
+	if err != nil {
+		return
+	}
+	z, err := ioutil.ReadAll(fz)
+	if err != nil {
+		return
+	}
+	szp, err := os.Create(szpname)
+	if err != nil {
+		return
+	}
+	defer szp.Close()
+	buf := new(bytes.Buffer)
+	size := make([]byte, 4)
+	binary.LittleEndian.PutUint32(size, uint32(len(meta)))
+	_, err = buf.Write(size)
+	if err != nil {
+		return
+	}
+	_, err = buf.Write(meta)
+	if err != nil {
+		return
+	}
+	_, err = buf.Write(z)
+	if err != nil {
+		return
+	}
+	d, err := signData(buf.Bytes(), cert, pkey)
+	if err != nil {
+		return
+	}
+	_, err = szp.Write(d)
+	if err != nil {
+		return
+	}
+	fz.Close()
+	err = os.Remove(zname)
+	if err != nil {
+		return
+	}
+	fmeta.Close()
+	err = os.Remove(metaName)
+	return
+}
+
+func readSZP(data []byte) (meta []byte, z []byte, err error) {
+	p, _ := pem.Decode(data)
+	if p == nil {
+		return nil, nil, errors.New("failed to parse PEM block")
+	}
+	p7, err := pkcs7.Parse(p.Bytes)
+	if err != nil {
+		return
+	}
+	data = p7.Content
+	initialSize := 4
+	size := data[:initialSize]
+	metaEnd := initialSize + int(binary.LittleEndian.Uint32(size))
+	meta = data[initialSize:metaEnd]
+	meta, err = uncompressData(meta)
+	if err != nil {
+		return
+	}
+	z = data[metaEnd:]
+	return
+}
+
+func extract(name string) (err error) {
+	szp, err := verifySign(name + ".szp")
+	if err != nil {
+		return
+	}
+	meta, z, err := readSZP(szp)
+	if err != nil {
+		return
+	}
+	fz, err := os.Create(name + ".zip")
+	if err != nil {
+		return
+	}
 	_, err = fz.Write(z)
-	CheckErr(err)
+	if err != nil {
+		return
+	}
 	fz.Close()
 	zr, err := zip.OpenReader(name + ".zip")
-	CheckErr(err)
+	if err != nil {
+		return
+	}
+	buf := new(bytes.Buffer)
+	_, err = buf.Write(meta)
+	if err != nil {
+		return
+	}
+	dec := xml.NewDecoder(buf)
+	var metaUnion []metaStruct
+	for {
+		var v metaStruct
+		err = dec.Decode(&v)
+		if err == io.EOF {
+			break
+		}
+		metaUnion = append(metaUnion, v)
+	}
 	os.Mkdir(path, os.FileMode('d'))
 	for _, f := range zr.File {
-		rc, err := f.Open()
-		CheckErr(err)
-		defer rc.Close()
 		if !f.FileInfo().IsDir() {
 			h := sha1.New()
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
 			_, err = io.Copy(h, rc)
-			CheckErr(err)
-			i := bytes.Index(meta, []byte(f.Name))
-			j := bytes.Index(meta[i:], []byte("</meta>"))
-			b := bytes.Contains(meta[i:i+j], []byte(fmt.Sprintf("%x", h.Sum(nil))))
-			if !b {
-				log.Fatal(errors.New("Hash of " + f.Name + " does not match"))
+			if err != nil {
+				return err
+			}
+			for _, v := range metaUnion {
+				if v.Name != f.Name {
+					continue
+				}
+				if v.SHA1 != fmt.Sprintf("%x", h.Sum(nil)) {
+					return errors.New("Hash of " + f.Name + " does not match")
+				}
+				break
 			}
 			file, err := os.Create(path + f.Name)
-			CheckErr(err)
-			defer file.Close()
+			if err != nil {
+				return err
+			}
+			rc, err = f.Open()
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(file, rc)
+			if err != nil {
+				return err
+			}
+			file.Close()
 			rc.Close()
-			rc, err := f.Open()
-			CheckErr(err)
-			_, err = io.CopyN(file, rc, int64(f.UncompressedSize64))
-			CheckErr(err)
 		} else {
 			err = os.Mkdir(path+f.Name, os.FileMode('d'))
 		}
 	}
 	zr.Close()
-	err = os.Remove("szip.zip")
-	CheckErr(err)
+	err = os.Remove(name + ".zip")
+	return
 }
 
-func Info(name string) {
-	crt, meta, z := ReadSZP(name)
-	err := VerifySign(z, crt)
+func info(name string) (err error) {
+	szp, err := verifySign(name + ".szp")
 	if err != nil {
-		log.Fatal(err)
-	} else {
-		fmt.Println("The sign has been successfully verified")
+		return
 	}
-	fmt.Println(string(meta))
+	meta, _, err := readSZP(szp)
+	if err != nil {
+		return
+	}
+	fmt.Printf("%s", meta)
+	return
 }
 
-func SignData(data []byte, cPath string, kPath string) (newData []byte, size int) {
-	b, _ := ReadFile(cPath)
+func getCertificate(path string) (c *x509.Certificate, err error) {
+	bf, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	b, err := ioutil.ReadAll(bf)
+	if err != nil {
+		return
+	}
 	block, _ := pem.Decode(b)
 	if block == nil {
-		panic("failed to parse PEM block")
+		return nil, errors.New("failed to parse PEM block")
 	}
-	c, err := x509.ParseCertificate(block.Bytes)
-	CheckErr(err)
-	b, _ = ReadFile(kPath)
-	block, _ = pem.Decode(b)
+	c, err = x509.ParseCertificate(block.Bytes)
+	return
+}
+
+func getPrivateKey(path string) (p interface{}, err error) {
+	bf, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	b, err := ioutil.ReadAll(bf)
+	if err != nil {
+		return
+	}
+	block, _ := pem.Decode(b)
 	if block == nil {
-		panic("failed to parse PEM block")
+		return nil, errors.New("failed to parse PEM block")
 	}
-	p, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	CheckErr(err)
+	p, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+	return
+}
+
+func signData(data []byte, cPath string, keyPath string) (sign []byte, err error) {
+	c, err := getCertificate(cPath)
+	if err != nil {
+		return
+	}
+	p, err := getPrivateKey(keyPath)
+	if err != nil {
+		return
+	}
 	// Initialize a SignedData struct with content to be signed
 	signedData, err := pkcs7.NewSignedData(data)
 	if err != nil {
-		fmt.Printf("Cannot initialize signed data: %s", err)
+		return nil, errors.New("Cannot initialize signed data")
 	}
 	// Add the signing cert and private key
 	if err := signedData.AddSigner(c, p, pkcs7.SignerInfoConfig{}); err != nil {
-		fmt.Printf("Cannot add signer: %s", err)
+		return nil, errors.New("Cannot add signer")
 	}
-	signedData.Detach()
-
 	// Finish() to obtain the signature bytes
-	detachedSignature, err := signedData.Finish()
+	sign, err = signedData.Finish()
 	if err != nil {
-		fmt.Printf("Cannot finish signing data: %s", err)
+		return nil, errors.New("Cannot finish signing data")
 	}
 	buf := new(bytes.Buffer)
-	pem.Encode(buf, &pem.Block{Type: "PKCS7", Bytes: detachedSignature})
-	return buf.Bytes(), buf.Len()
+	pem.Encode(buf, &pem.Block{Type: "PKCS7", Bytes: sign})
+	return buf.Bytes(), err
 }
 
-func VerifySign(data []byte, pkcs []byte) error {
-	p, _ := pem.Decode(pkcs)
+func verifySign(name string) (data []byte, err error) {
+	fszp, err := os.Open(name)
+	if err != nil {
+		return
+	}
+	defer fszp.Close()
+	szp, err := ioutil.ReadAll(fszp)
+	if err != nil {
+		return
+	}
+	p, _ := pem.Decode(szp)
+	if p == nil {
+		return nil, errors.New("failed to parse PEM block")
+	}
 	p7, err := pkcs7.Parse(p.Bytes)
-	CheckErr(err)
-	p7.Content = data
+	if err != nil {
+		return
+	}
 	if hash != "" {
-		h := sha1.Sum(pkcs)
+		h := sha1.Sum(szp)
 		if fmt.Sprintf("%x", h) == hash {
-			fmt.Println("Hash of the cetrificate matches the specified")
+			fmt.Println("Hash of the certificate matches the specified")
 		} else {
-			log.Fatal(errors.New("Hash of the cetrificate does not match the specified"))
+			return nil, errors.New("Hash of the certificate does not match the specified")
 		}
 	}
-	return p7.Verify()
+	err = p7.Verify()
+	if err != nil {
+		return
+	}
+	fmt.Println("The sign has been successfully verified")
+	return szp, err
 }
 
-func CompressData(data []byte) (newData []byte, size int) {
+func compressData(data []byte) (newData []byte, err error) {
 	buf := new(bytes.Buffer)
-	_, err := buf.Write(data)
-	CheckErr(err)
+	_, err = buf.Write(data)
+	if err != nil {
+		return
+	}
 	nbuf := new(bytes.Buffer)
 	w, err := flate.NewWriter(nbuf, -1)
-	CheckErr(err)
+	if err != nil {
+		return
+	}
 	_, err = w.Write(buf.Bytes())
-	CheckErr(err)
+	if err != nil {
+		return
+	}
 	err = w.Close()
-	CheckErr(err)
-	return nbuf.Bytes(), nbuf.Len()
+	if err != nil {
+		return
+	}
+	return nbuf.Bytes(), err
 }
 
-func UncompressData(data []byte) (newData []byte, size int) {
+func uncompressData(data []byte) (newData []byte, err error) {
 	buf := new(bytes.Buffer)
-	_, err := buf.Write(data)
-	CheckErr(err)
+	_, err = buf.Write(data)
+	if err != nil {
+		return
+	}
 	rc := flate.NewReader(buf)
-	d := make([]byte, 1024)
 	nbuf := new(bytes.Buffer)
-	for {
-		n, err := rc.Read(d)
-		if err == io.EOF {
-			_, err2 := nbuf.Write(d[:n])
-			CheckErr(err2)
-			break
-		}
-		_, err = nbuf.Write(d)
-		CheckErr(err)
+	_, err = io.Copy(nbuf, rc)
+	if err != nil {
+		return
 	}
 	err = rc.Close()
-	CheckErr(err)
-	return nbuf.Bytes(), nbuf.Len()
-}
-
-func main() {
-	flag.Parse()
-	Execute(mode)
+	if err != nil {
+		return
+	}
+	return nbuf.Bytes(), err
 }
