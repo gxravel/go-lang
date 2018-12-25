@@ -16,18 +16,23 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fullsailor/pkcs7"
 )
 
-var mode string
-var hash string
-var cert string
-var pkey string
-var path string
-var modesEnum = []string{"z", "x", "i"}
-var enc *xml.Encoder
+var (
+	mode      string
+	hash      string
+	cert      string
+	pkey      string
+	dataPath  string
+	modesEnum = []string{"z", "x", "i"}
+	enc       *xml.Encoder
+	metaBuf   = new(bytes.Buffer)
+)
 
 const zName = "szip"
 const metaName = "meta.xml"
@@ -45,7 +50,7 @@ func init() {
 	flag.StringVar(&hash, "hash", "", "hash")
 	flag.StringVar(&cert, "cert", "./my.crt", "certificate path")
 	flag.StringVar(&pkey, "pkey", "./my.key", "private key path")
-	flag.StringVar(&path, "path", "./data/", "read/write files path")
+	flag.StringVar(&dataPath, "path", "./data/", "read/write files path")
 }
 
 func main() {
@@ -57,11 +62,11 @@ func execute(mode string) {
 	var err error
 	switch mode {
 	case modesEnum[0]:
-		err = zipFunc(zName)
+		err = zipFunc(filepath.Clean(zName))
 	case modesEnum[1]:
-		err = extract(zName)
+		err = extract(filepath.Clean(zName))
 	case modesEnum[2]:
-		err = info(zName)
+		err = info(filepath.Clean(zName))
 	default:
 		err = errors.New("mode can be only -z, -x or -i")
 	}
@@ -69,7 +74,7 @@ func execute(mode string) {
 }
 
 func addData(zPath string, w *zip.Writer) (err error) {
-	data, err := os.Open(path + zPath)
+	data, err := os.Open(filepath.Join(dataPath, zPath))
 	if err != nil {
 		return
 	}
@@ -80,14 +85,14 @@ func addData(zPath string, w *zip.Writer) (err error) {
 	}
 	for _, file := range dirinfo {
 		if file.IsDir() {
-			newFolder := zPath + file.Name() + "/"
+			newFolder := filepath.ToSlash(filepath.Join(zPath, file.Name())) + "/"
 			_, err = w.Create(newFolder)
 			if err != nil {
 				return
 			}
 			addData(newFolder, w)
 		} else {
-			f, err := os.Open(path + zPath + file.Name())
+			f, err := os.Open(filepath.Join(dataPath, zPath, file.Name()))
 			if err != nil {
 				return err
 			}
@@ -99,7 +104,7 @@ func addData(zPath string, w *zip.Writer) (err error) {
 			if err != nil {
 				return err
 			}
-			fpath := zPath + file.Name()
+			fpath := filepath.Join(zPath, file.Name())
 			header.Name = fpath
 			header.Method = zip.Deflate
 			writer, err := w.CreateHeader(header)
@@ -116,8 +121,7 @@ func addData(zPath string, w *zip.Writer) (err error) {
 				ModTime:          header.ModTime(),
 			}
 			h := sha1.New()
-			f.Close()
-			f, err = os.Open(path + zPath + file.Name())
+			_, err = f.Seek(0, 0)
 			if err != nil {
 				return err
 			}
@@ -125,6 +129,7 @@ func addData(zPath string, w *zip.Writer) (err error) {
 			if err != nil {
 				return err
 			}
+			f.Close()
 			v.SHA1 = fmt.Sprintf("%x", h.Sum(nil))
 			err = enc.Encode(v)
 			if err != nil {
@@ -141,11 +146,7 @@ func zipFunc(name string) (err error) {
 		return
 	}
 	w := zip.NewWriter(fz)
-	meta, err := os.Create(metaName)
-	if err != nil {
-		return
-	}
-	enc = xml.NewEncoder(meta)
+	enc = xml.NewEncoder(metaBuf)
 	enc.Indent("  ", "    ")
 	err = addData("", w)
 	if err != nil {
@@ -156,7 +157,6 @@ func zipFunc(name string) (err error) {
 		return
 	}
 	fz.Close()
-	meta.Close()
 	err = createSZP(name)
 	return
 }
@@ -164,15 +164,7 @@ func zipFunc(name string) (err error) {
 func createSZP(name string) (err error) {
 	zname := name + ".zip"
 	szpname := name + ".szp"
-	fmeta, err := os.Open(metaName)
-	if err != nil {
-		return
-	}
-	meta, err := ioutil.ReadAll(fmeta)
-	if err != nil {
-		return
-	}
-	meta, err = compressData(meta)
+	meta, err := compressData(metaBuf.Bytes())
 	if err != nil {
 		return
 	}
@@ -204,7 +196,7 @@ func createSZP(name string) (err error) {
 	if err != nil {
 		return
 	}
-	d, err := signData(buf.Bytes(), cert, pkey)
+	d, err := signData(buf.Bytes(), filepath.Clean(cert), filepath.Clean(pkey))
 	if err != nil {
 		return
 	}
@@ -214,11 +206,6 @@ func createSZP(name string) (err error) {
 	}
 	fz.Close()
 	err = os.Remove(zname)
-	if err != nil {
-		return
-	}
-	fmeta.Close()
-	err = os.Remove(metaName)
 	return
 }
 
@@ -281,7 +268,7 @@ func extract(name string) (err error) {
 		}
 		metaUnion = append(metaUnion, v)
 	}
-	os.Mkdir(path, os.FileMode('d'))
+	os.MkdirAll(filepath.Clean(dataPath), os.FileMode('d'))
 	for _, f := range zr.File {
 		if !f.FileInfo().IsDir() {
 			h := sha1.New()
@@ -294,15 +281,15 @@ func extract(name string) (err error) {
 				return err
 			}
 			for _, v := range metaUnion {
-				if v.Name != f.Name {
+				if !strings.EqualFold(v.Name, f.Name) {
 					continue
 				}
-				if v.SHA1 != fmt.Sprintf("%x", h.Sum(nil)) {
+				if !strings.EqualFold(v.SHA1, fmt.Sprintf("%x", h.Sum(nil))) {
 					return errors.New("Hash of " + f.Name + " does not match")
 				}
 				break
 			}
-			file, err := os.Create(path + f.Name)
+			file, err := os.Create(filepath.Join(dataPath, f.Name))
 			if err != nil {
 				return err
 			}
@@ -317,7 +304,7 @@ func extract(name string) (err error) {
 			file.Close()
 			rc.Close()
 		} else {
-			err = os.Mkdir(path+f.Name, os.FileMode('d'))
+			os.MkdirAll(filepath.Join(dataPath, f.Name), os.FileMode('d'))
 		}
 	}
 	zr.Close()
@@ -381,16 +368,13 @@ func signData(data []byte, cPath string, keyPath string) (sign []byte, err error
 	if err != nil {
 		return
 	}
-	// Initialize a SignedData struct with content to be signed
 	signedData, err := pkcs7.NewSignedData(data)
 	if err != nil {
 		return nil, errors.New("Cannot initialize signed data")
 	}
-	// Add the signing cert and private key
 	if err := signedData.AddSigner(c, p, pkcs7.SignerInfoConfig{}); err != nil {
 		return nil, errors.New("Cannot add signer")
 	}
-	// Finish() to obtain the signature bytes
 	sign, err = signedData.Finish()
 	if err != nil {
 		return nil, errors.New("Cannot finish signing data")
@@ -420,7 +404,7 @@ func verifySign(name string) (data []byte, err error) {
 	}
 	if hash != "" {
 		h := sha1.Sum(szp)
-		if fmt.Sprintf("%x", h) == hash {
+		if strings.EqualFold(fmt.Sprintf("%x", h), hash) {
 			fmt.Println("Hash of the certificate matches the specified")
 		} else {
 			return nil, errors.New("Hash of the certificate does not match the specified")
