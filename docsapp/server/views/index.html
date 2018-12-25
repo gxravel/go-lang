@@ -1,0 +1,30 @@
+<!DOCTYPE html />
+<html>
+    <head>
+        <title>index</title>
+        <meta charset="utf-8" />
+    </head>
+    <body>
+        <div>
+            <form action="/docs" method="GET" enctype="application/x-www-form-urlencoded">
+                <input type="hidden" name="token" value={{.}} />
+                <label for="login">Login (optionable)</label>
+                <input type="text" name="login" value="login" />
+                <select name="key" id="key[]" size="5">
+                    <option disabled>Choose Column</option>
+                    <option value="ID">ID</option>
+                    <option value="name">name</option>
+                    <option value="mime">mime</option>
+                    <option value="file">file</option>
+                    <option selected value="public">public</option>
+                    <option value="created">created</option>
+                </select>
+                <label for="keyValue">Value</label>
+                <input type="text" name="keyValue" value="1" />
+                <label for="limit">Limit</label>
+                <input type="number" name="limit" value="10" />
+                <input type="submit" name="getDocs" value="get docs" />
+            </form>
+        </div>
+    </body>
+</html>

@@ -1,0 +1,76 @@
+<!DOCTYPE html />
+<html>
+    <head>
+        <title>docs</title>
+        <meta charset="utf-8" />
+    </head>
+    <body>
+        <div>
+            <a href="http://localhost:8080">Go home</a>
+        </div>
+        <div>
+            <form id="postDocsForm" name="postDocsForm" enctype="multipart/form-data">
+                <input type="file" name="document" id="document" required />
+                <p><label for="public">public</label></p>
+                <input type="checkbox" name="public" id="public" value="false" />
+                <input type="hidden" name="token" id="token" value={{.Token}} />
+                <p><label for="grant">grant</label></p>
+                <select size="5" multiple name="grant[]">
+                    <option disabled>users</option>
+                    <option selected value="login">login</option>
+                    <option value="login1">login1</option>
+                    <option value="login2">login2</option>
+                </select>
+                <input type="submit" name="load" value="load"/>
+            </form>
+            <script type="text/javascript">
+                window.addEventListener("load", function () {
+                    var form = document.getElementById("postDocsForm");
+                    form.addEventListener("submit", function (event) {
+                        event.preventDefault();
+                        sendData();
+                    });
+                });
+                function getSelectValues (s) {
+                    var result = [];
+                    var options = s && s.options;
+                    var opt;
+                    for (var i=0, iLen=options.length; i<iLen; i++) {
+                        opt = options[i];
+                        if (opt.selected) {
+                        result.push(opt.value || opt.text);
+                        }
+                    }
+                    return result;
+                }
+                function sendData() {
+                    var meta = {
+                        name: document.getElementById("document").files[0].name,
+                        file: true,
+                        public: document.getElementById("public").checked ? true : false,
+                        token: document.getElementById("token").value,
+                        mime: document.getElementById("document").files[0].type,
+                        grant: getSelectValues(document.getElementsByName("grant[]")[0])
+                    }
+                    var formData = new FormData();
+                    formData.append("meta", JSON.stringify(meta, null, "  "))
+                    formData.append("document", document.getElementById("document").files[0]);
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", '/docs');
+                    xhr.onreadystatechange = function () {
+                        if(xhr.readyState === 4 && xhr.status === 200) {
+                            console.log(xhr.responseText);
+                        }
+                    };
+                    xhr.send(formData);
+                } 
+            </script>
+        </div>
+        <div>
+            {{range .Docs}}
+                <p><a href="/docs/{{.ID}}">{{.Name}}</a></p>
+                <br>
+            {{end}}
+        </div>
+    </body>
+</html>
