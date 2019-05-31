@@ -1,0 +1,121 @@
+<!DOCTYPE HTML>
+<html>
+ <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <link rel="stylesheet" type="text/css" href="map.css" />
+  <title>Map</title>
+ </head>
+ <body>
+     <div class="map">
+         <img class="img" id="img" src="http://localhost:8100/admin_level_2.png">
+     </div>
+     <script>
+        let clientX = 0.0;
+        let clientY = 0.0;
+        let ticking = false;
+        let hostFileServer = "http://localhost:8100/";
+        let hostHttpServer = "http://localhost:8080/"
+        let order = 1;
+        let zoomIn = true;
+        let srcStack = [];
+        var dragX = 0;
+        var dragY = 0;
+        let image = document.getElementById("img");
+        httpGet(hostHttpServer+`zoom?order=1&clientx=0&clienty=0`, changeImgSrc)
+        const maxOrder = 4;
+        const minOrder = 1;
+        const timeout = 100;
+        const width = 1366;
+        const height = 1024;
+        const scaleX = 7;
+        const scaleY = 10;
+
+        function httpGet(theUrl, callback)
+        {
+            var xmlHttp = new XMLHttpRequest();
+            xmlHttp.onreadystatechange = function() { 
+                if (xmlHttp.readyState == 4 && xmlHttp.status == 200)
+                    callback(xmlHttp.responseText);
+            }
+            xmlHttp.open("GET", theUrl, true); // true for asynchronous 
+            xmlHttp.send(null);
+        }
+
+        function convertXY(clientX, clientY, invertY) {
+            let imageHeight = image.clientHeight;
+            let imageWidth = image.clientWidth;
+            let X = clientX * width / imageWidth / scaleX;
+            let Y = clientY;
+            if (invertY) {
+                Y = imageHeight - clientY;
+            }
+            Y = Y * height / imageHeight / scaleY;
+            return {x: X, y: Y};
+        }
+
+        function changeImgSrc(src) {
+            image.src = src + "?" + new Date().getTime();
+        }
+        function reloadImg(msg) {
+            console.log(msg);
+            image.src += "#";
+        }
+        function zoom(zoomIn, clientX, clientY) {
+            if (!ticking) {
+                setTimeout(() => {
+                    if (zoomIn && order < maxOrder) {
+                        order += 1;
+                        srcStack.push(image.getAttribute('src'));
+                    } else if (!zoomIn && order > minOrder) {
+                        order -= 1;
+                        changeImgSrc(srcStack.pop());
+                        ticking = false;
+                        return;
+                    }
+                    coords = convertXY(clientX, clientY, true);
+                    console.log(coords);
+                    httpGet(hostHttpServer+`zoom?order=${order}&clientx=${coords.x}&clienty=${coords.y}`, changeImgSrc);
+                    ticking = false;
+                }, 100);
+
+                ticking = true;
+            }
+        }
+        image.addEventListener('dblclick', function(e) {
+            e.preventDefault();
+            zoomIn = true;
+            if (e.ctrlKey) {
+                zoomIn = false;
+            }
+            zoom(zoomIn, e.clientX, e.clientY);
+        });
+        image.addEventListener('wheel', function(e) {
+            e.preventDefault();
+            zoomIn = e.deltaY < 0;
+            zoom(zoomIn, e.clientX, e.clientY);
+        });
+        image.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            dragX = e.clientX;
+            dragY = e.clientY;
+        });
+        image.addEventListener('mouseup', function(e) {
+            e.preventDefault();
+            dragX = e.clientX - dragX;
+            dragY = -(e.clientY - dragY);
+            if (dragX == 0 && dragY == 0) 
+                return;
+            let ticking2 = false;
+            if (!ticking2) {
+                setTimeout(() => {
+                    coords = convertXY(dragX, dragY, false);
+                    httpGet(hostHttpServer+`drag?order=${order}&clientx=${coords.x}&clienty=${coords.y}`, reloadImg);
+                    ticking2 = false;
+                }, timeout);
+
+                ticking2 = true;
+            }
+        });
+     </script>
+ </body>
+</html>

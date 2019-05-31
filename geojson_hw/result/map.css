@@ -1,0 +1,9 @@
+* {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+}
+.img {
+    height: 768px;
+    width: 1366px;
+}
